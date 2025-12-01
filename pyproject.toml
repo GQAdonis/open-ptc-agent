@@ -15,6 +15,7 @@ dependencies = [
     "jinja2>=3.1.0",
     "aiohttp>=3.9.0",
     "aiofiles>=23.0.0",
+    "Pillow>=9.0.0",
     "langchain-openai>=1.0.2",
     "langchain-anthropic>=1.0.3",
     "langchain_tavily>=0.2.13",
