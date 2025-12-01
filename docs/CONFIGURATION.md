@@ -1,5 +1,7 @@
 # Configuration Guide
 
+[English](CONFIGURATION.md) | [中文](zh/CONFIGURATION.md)
+
 This guide covers all configuration options for Open PTC Agent.
 
 ## Overview
@@ -25,11 +27,16 @@ llm:
   name: "claude-sonnet-4-5"
 ```
 
-Available options depend on what's defined in `llms.json`. Default options:
-- `claude-sonnet-4-5` - Anthropic Claude Sonnet 4.5
-- `claude-opus-4-5` - Anthropic Claude Opus 4.5
-- `gpt-5.1-codex-mini` - OpenAI GPT-5.1 Codex Mini
-- `gemini-3-pro` - Google Gemini 3 Pro
+Available options depend on what's defined in `llms.json`. Pre-configured models:
+
+- `claude-sonnet-4-5`, `claude-opus-4-5` - Anthropic Claude
+- `gpt-5.1-codex`, `gpt-5.1-codex-mini` - OpenAI GPT
+- `gemini-3-pro`, `gemini-3-pro-image` - Google Gemini
+- `glm-4.6` - Z.AI/Zhipu GLM
+- `minimax-m2-stable` - Minimax M2
+- `doubao-seed-code` - Volcengine/ByteDance Doubao
+- `qwen3-max` - Dashscope/Alibaba Qwen
+- `kimi-k2-thinking` - Moonshot Kimi
 
 ---
 
@@ -130,8 +137,8 @@ mcp:
 - `sse` - Server-Sent Events
 
 **Tool Exposure Modes**:
-- `summary` - Brief tool descriptions (recommended for simple tools)
-- `full` - Complete signatures with all parameters (use for complex APIs)
+- `summary` - Brief tool descriptions (recommended)
+- `full` - Complete signatures with all parameters (use for frequently called tools)
 
 **Adding a Custom MCP Server**:
 
@@ -249,7 +256,10 @@ Defines available LLM providers.
       "api_key_env": "ENV_VAR_NAME",
       "base_url": "https://custom-endpoint",  // Optional
       "output_version": "responses/v1",       // Optional (OpenAI)
-      "use_previous_response_id": true        // Optional (OpenAI)
+      "use_previous_response_id": true,       // Optional (OpenAI)
+      "parameters": {                         // Optional - model-specific
+        "key": "value"
+      }
     }
   }
 }
@@ -271,33 +281,85 @@ Defines available LLM providers.
 | `base_url` | Custom API endpoint (for proxies or alternative providers) |
 | `output_version` | OpenAI-specific output format |
 | `use_previous_response_id` | OpenAI-specific response chaining |
+| `parameters` | Model-specific parameters (e.g., `reasoning.effort` for OpenAI, `enable_thinking` for Qwen) |
 
-### Adding a New Provider
+### Adding a New LLM Provider
+
+#### Step 1: Choose the Right SDK
+
+| Model Type | Recommended SDK | Notes |
+|------------|-----------------|-------|
+| Anthropic native | `langchain_anthropic.ChatAnthropic` | Claude models |
+| OpenAI native | `langchain_openai.ChatOpenAI` | GPT models, supports responses API |
+| Google | `langchain_google_genai.ChatGoogleGenerativeAI` | Gemini models |
+| OpenAI-compatible with reasoning | `langchain_deepseek.ChatDeepSeek` or `langchain_qwq.ChatQwen` | Use to capture reasoning/thinking tokens |
+| Interleaved thinking models | `langchain_anthropic.ChatAnthropic` | For Minimax, Kimi K2 - use provider's Anthropic endpoint |
+
+#### SDK Selection Guidelines
+
+1. **Standard OpenAI-compatible models**: Use `langchain_openai.ChatOpenAI`
+
+2. **Models with reasoning/thinking output**: If the model outputs reasoning tokens via OpenAI completion API, use `langchain_deepseek.ChatDeepSeek` or `langchain_qwq.ChatQwen` to properly capture the reasoning content.
+   ```json
+   {
+     "qwen3-max": {
+       "sdk": "langchain_qwq.ChatQwen",
+       "parameters": { "enable_thinking": true }
+     }
+   }
+   ```
+
+3. **OpenAI Responses API support**: Some models (like Doubao) support OpenAI's responses API.
+   ```json
+   {
+     "doubao-seed-code": {
+       "sdk": "langchain_openai.ChatOpenAI",
+       "output_version": "responses/v1",
+       "use_previous_response_id": true
+     }
+   }
+   ```
+
+4. **Interleaved thinking models (Minimax, Kimi K2)**: These have native interleaved thinking similar to Claude. Use `langchain_anthropic.ChatAnthropic` with the provider's Anthropic-compatible endpoint.
+   ```json
+   {
+     "kimi-k2-thinking": {
+       "sdk": "langchain_anthropic.ChatAnthropic",
+       "base_url": "https://api.moonshot.ai/anthropic"
+     }
+   }
+   ```
+   > **Note**: Third-party providers (e.g., OpenRouter) may have poor support for interleaved thinking - prefer direct provider endpoints.
+
+#### Step 2: Verify Base URL and Regional Settings
+
+- Check provider documentation for the correct endpoint
+- Be aware of regional differences (e.g., `api.z.ai` vs regional variants)
+- Chinese providers often have different endpoints for different regions
+
+#### Step 3: Add Configuration
 
 1. Add definition to `llms.json`:
-
 ```json
 {
   "llms": {
     "my-custom-model": {
       "model_id": "custom-model-v1",
-      "provider": "anthropic",
+      "provider": "my-provider",
       "sdk": "langchain_anthropic.ChatAnthropic",
       "api_key_env": "MY_CUSTOM_API_KEY",
-      "base_url": "https://my-proxy.example.com/anthropic"
+      "base_url": "https://api.my-provider.com/anthropic"
     }
   }
 }
 ```
 
 2. Add API key to `.env`:
-
 ```bash
 MY_CUSTOM_API_KEY=your-api-key
 ```
 
 3. Update `config.yaml`:
-
 ```yaml
 llm:
   name: "my-custom-model"
@@ -307,22 +369,25 @@ llm:
 
 ## Example Configurations
 
-### Minimal Setup (Claude + Tavily)
+### Minimal Setup
+
+Only requires one LLM provider and Daytona. Uses the bundled yfinance MCP server (no additional API keys needed).
 
 **config.yaml**:
 ```yaml
 llm:
-  name: "claude-sonnet-4-5"
+  name: "claude-sonnet-4-5"  # Or any configured model
 
 mcp:
   servers:
     - name: "tavily"
+      enabled: false  # Requires TAVILY_API_KEY
+
+    - name: "yfinance"
       enabled: true
       transport: "stdio"
-      command: "npx"
-      args: ["-y", "tavily-mcp@latest"]
-      env:
-        TAVILY_API_KEY: "${TAVILY_API_KEY}"
+      command: "uv"
+      args: ["run", "python", "mcp_servers/yfinance_mcp_server.py"]
 
 storage:
   provider: "none"
@@ -330,9 +395,12 @@ storage:
 
 **.env**:
 ```bash
+# One LLM provider (choose one)
 ANTHROPIC_API_KEY=your-key
+# or OPENAI_API_KEY, GEMINI_API_KEY, ZAI_API_KEY, etc.
+
+# Daytona (required)
 DAYTONA_API_KEY=your-key
-TAVILY_API_KEY=your-key
 ```
 
 ### Full Setup (Multiple LLMs + Storage)

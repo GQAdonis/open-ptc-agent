@@ -32,6 +32,8 @@ dependencies = [
     "tavily>=1.1.0",
     "yfinance>=0.2.40",
     "boto3>=1.41.3",
+    "langchain-qwq>=0.3.1",
+    "langchain-deepseek>=1.0.1",
 ]
 
 [project.optional-dependencies]
