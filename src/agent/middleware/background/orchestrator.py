@@ -163,22 +163,36 @@ class BackgroundSubagentOrchestrator:
         self,
         input_state: dict[str, Any],
         config: dict[str, Any] | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
+        *,
+        stream_mode: str | list[str] | None = None,
+        subgraphs: bool = False,
+        **kwargs: Any,
+    ) -> AsyncIterator[Any]:
         """Stream agent responses with background result handling.
 
         Streams the agent's responses, handling background results between
-        invocations.
+        invocations. Fully compatible with LangGraph's streaming API.
 
         Args:
             input_state: Initial state for the agent
             config: Optional config dict for the agent
+            stream_mode: Stream mode(s) - "values", "updates", "messages", or list
+            subgraphs: Whether to include subgraph events
+            **kwargs: Additional arguments passed to underlying agent.astream()
 
         Yields:
-            Agent events/updates
+            Agent events/updates (format depends on stream_mode)
         """
         config = config or {}
         iteration = 0
         current_state = input_state
+
+        # Build kwargs for underlying astream call
+        stream_kwargs: dict[str, Any] = {**kwargs}
+        if stream_mode is not None:
+            stream_kwargs["stream_mode"] = stream_mode
+        if subgraphs:
+            stream_kwargs["subgraphs"] = subgraphs
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -186,10 +200,12 @@ class BackgroundSubagentOrchestrator:
             logger.info(
                 "Orchestrator streaming agent",
                 iteration=iteration,
+                stream_mode=stream_mode,
+                subgraphs=subgraphs,
             )
 
-            # Stream the agent
-            async for event in self.agent.astream(current_state, config):
+            # Stream the agent with all parameters
+            async for event in self.agent.astream(current_state, config, **stream_kwargs):
                 yield event
 
             # After streaming completes, check for pending results
