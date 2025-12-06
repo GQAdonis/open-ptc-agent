@@ -75,12 +75,12 @@ class PTCSandbox:
         "tqdm", "tabulate",
     ]
 
-    def __init__(self, config: CoreConfig, mcp_registry: MCPRegistry):
+    def __init__(self, config: CoreConfig, mcp_registry: MCPRegistry | None = None):
         """Initialize PTC sandbox.
 
         Args:
             config: Configuration object
-            mcp_registry: MCP registry with connected servers
+            mcp_registry: MCP registry with connected servers (can be None for reconnect)
         """
         self.config = config
         self.mcp_registry = mcp_registry
@@ -317,9 +317,16 @@ class PTCSandbox:
         logger.warning("Snapshot not found and auto_create disabled")
         return None
 
-    async def setup(self) -> None:
-        """Set up the sandbox environment."""
-        logger.info("Setting up sandbox")
+    async def setup_sandbox_workspace(self) -> str | None:
+        """Create sandbox and setup workspace directories.
+
+        Can run concurrently with MCP registry connection since it doesn't
+        require the registry.
+
+        Returns:
+            snapshot_name if used, None otherwise
+        """
+        logger.info("Setting up sandbox workspace")
 
         # Try to use snapshot if enabled
         snapshot_name = await self._ensure_snapshot()
@@ -364,6 +371,19 @@ class PTCSandbox:
             # Ensure workspace directories exist (results, data, etc.)
             await self._setup_workspace()
 
+        logger.info("Sandbox workspace ready", sandbox_id=self.sandbox_id)
+        return snapshot_name
+
+    async def setup_tools_and_mcp(self, snapshot_name: str | None) -> None:
+        """Install tool modules and start MCP servers.
+
+        Requires MCP registry to be connected first.
+
+        Args:
+            snapshot_name: Snapshot name from setup_sandbox_workspace(), or None
+        """
+        logger.info("Setting up tools and MCP servers")
+
         # Upload custom Python MCP server files to sandbox
         await self._upload_mcp_server_files()
 
@@ -380,7 +400,90 @@ class PTCSandbox:
                 "MCP tools will not work without snapshot."
             )
 
+        logger.info("Tools and MCP servers ready", sandbox_id=self.sandbox_id)
+
+    async def setup(self) -> None:
+        """Set up the sandbox environment.
+
+        For async initialization, use setup_sandbox_workspace() and
+        setup_tools_and_mcp() separately via Session.initialize().
+        """
+        snapshot_name = await self.setup_sandbox_workspace()
+        await self.setup_tools_and_mcp(snapshot_name)
         logger.info("Sandbox setup complete", sandbox_id=self.sandbox_id)
+
+    async def reconnect(self, sandbox_id: str) -> None:
+        """Reconnect to a stopped sandbox.
+
+        This is a fast path for session persistence - it starts a stopped
+        sandbox and skips all setup work (file uploads, tool modules, etc.)
+        since they're already present from the first session.
+
+        Args:
+            sandbox_id: The ID of an existing Daytona sandbox
+
+        Raises:
+            RuntimeError: If sandbox cannot be found or is in invalid state
+        """
+        logger.info("Reconnecting to stopped sandbox", sandbox_id=sandbox_id)
+
+        # Get the existing sandbox from Daytona with error handling
+        try:
+            self.sandbox = await self._run_sync(self.daytona_client.get, sandbox_id)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to find sandbox {sandbox_id}. It may have been deleted. "
+                f"Original error: {e}"
+            ) from e
+
+        self.sandbox_id = sandbox_id
+
+        # Check sandbox state before attempting to start
+        state = getattr(self.sandbox, 'state', None)
+        if state:
+            state_value = state.value if hasattr(state, 'value') else str(state)
+            if state_value == 'started':
+                logger.info("Sandbox already started, skipping start", sandbox_id=sandbox_id)
+            elif state_value in ('stopped', 'starting'):
+                logger.info("Starting stopped sandbox", sandbox_id=sandbox_id, state=state_value)
+                await self._run_sync(self.sandbox.start, timeout=60)
+            else:
+                raise RuntimeError(
+                    f"Cannot reconnect to sandbox in state: {state_value}. "
+                    f"Expected 'stopped' or 'started'."
+                )
+        else:
+            # No state attribute, assume we need to start
+            logger.info("Starting sandbox (state unknown)", sandbox_id=sandbox_id)
+            await self._run_sync(self.sandbox.start, timeout=60)
+
+        # Get work directory reference
+        self._work_dir = await self._run_sync(self.sandbox.get_work_dir)
+        logger.info(f"Sandbox working directory: {self._work_dir}")
+
+        # SKIP: _setup_workspace() - directories already exist
+        # SKIP: _upload_mcp_server_files() - files already uploaded
+        # SKIP: _install_tool_modules() - tool modules already installed
+
+        # Initialize MCP server sessions (needed for tool execution)
+        self.mcp_server_sessions = {}
+        await self._start_internal_mcp_servers()
+
+        logger.info(
+            "Sandbox started from stopped state",
+            sandbox_id=self.sandbox_id,
+        )
+
+    async def stop_sandbox(self) -> None:
+        """Stop the sandbox without deleting it.
+
+        Used for session persistence - stops the sandbox so it can be
+        restarted quickly on the next session, rather than deleting it.
+        """
+        if self.sandbox:
+            logger.info("Stopping sandbox", sandbox_id=self.sandbox_id)
+            await self._run_sync(self.sandbox.stop, timeout=60)
+            logger.info("Sandbox stopped", sandbox_id=self.sandbox_id)
 
     async def _setup_workspace(self) -> None:
         """Create workspace directory structure."""

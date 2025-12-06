@@ -30,24 +30,64 @@ class Session:
 
         logger.info("Created session", conversation_id=conversation_id)
 
-    async def initialize(self) -> None:
-        """Initialize the session (connect MCP servers and setup sandbox)."""
+    async def initialize(self, sandbox_id: str | None = None) -> None:
+        """Initialize the session (connect MCP servers and setup sandbox).
+
+        Args:
+            sandbox_id: Optional existing sandbox ID to reconnect to instead of creating new
+        """
         if self._initialized:
             logger.warning("Session already initialized", conversation_id=self.conversation_id)
             return
 
-        logger.info("Initializing session", conversation_id=self.conversation_id)
-
-        # Initialize MCP registry
-        self.mcp_registry = MCPRegistry(self.config)
-        await self.mcp_registry.connect_all()
-
-        # Create and setup sandbox
-        # Wrap constructor in thread to avoid blocking from Daytona SDK initialization
-        self.sandbox = await asyncio.to_thread(
-            PTCSandbox, self.config, self.mcp_registry
+        logger.info(
+            "Initializing session",
+            conversation_id=self.conversation_id,
+            reconnecting=sandbox_id is not None,
         )
-        await self.sandbox.setup()
+
+        # Initialize MCP registry (but don't connect yet for reconnect - we'll do it in parallel)
+        self.mcp_registry = MCPRegistry(self.config)
+
+        if sandbox_id:
+            # RECONNECT MODE: Run MCP connections and sandbox start in parallel
+            # This saves ~1s by overlapping the two slow operations
+
+            # Create sandbox instance without mcp_registry (not needed for reconnect)
+            self.sandbox = await asyncio.to_thread(
+                PTCSandbox, self.config, None
+            )
+
+            # Run both operations in parallel
+            await asyncio.gather(
+                self.mcp_registry.connect_all(),
+                self.sandbox.reconnect(sandbox_id),
+            )
+
+            # Set mcp_registry on sandbox now that it's connected
+            self.sandbox.mcp_registry = self.mcp_registry
+
+            logger.info(
+                "Reconnected to existing sandbox",
+                conversation_id=self.conversation_id,
+                sandbox_id=sandbox_id,
+            )
+        else:
+            # NEW SANDBOX MODE: Run workspace setup and MCP connect concurrently
+            self.sandbox = await asyncio.to_thread(
+                PTCSandbox, self.config, None
+            )
+
+            snapshot_name, _ = await asyncio.gather(
+                self.sandbox.setup_sandbox_workspace(),
+                self.mcp_registry.connect_all(),
+            )
+
+            # Set mcp_registry now that it's connected
+            self.sandbox.mcp_registry = self.mcp_registry
+
+            # Tool installation requires mcp_registry
+            await self.sandbox.setup_tools_and_mcp(snapshot_name)
 
         self._initialized = True
 
@@ -79,6 +119,23 @@ class Session:
         self._initialized = False
 
         logger.info("Session cleaned up", conversation_id=self.conversation_id)
+
+    async def stop(self) -> None:
+        """Stop sandbox for session persistence (doesn't delete).
+
+        This is used when persist_session is enabled - stops the sandbox
+        so it can be restarted quickly on the next session, rather than
+        deleting it entirely.
+        """
+        logger.info("Stopping session for persistence", conversation_id=self.conversation_id)
+
+        if self.sandbox:
+            await self.sandbox.stop_sandbox()
+
+        if self.mcp_registry:
+            await self.mcp_registry.disconnect_all()
+
+        logger.info("Session stopped", conversation_id=self.conversation_id)
 
     async def __aenter__(self):
         """Async context manager entry."""
